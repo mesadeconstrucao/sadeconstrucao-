@@ -106,6 +106,18 @@ async function deflateRaw(bytes) {
   return streamBytes(cs.readable);
 }
 
+// HoloPrint pode guardar a estrutura NBT dentro de um arquivo GZIP (.mcstructure.gzip).
+async function gunzip(bytes) {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("Este navegador não oferece descompactação GZIP. Atualize o navegador e tente novamente.");
+  }
+  const ds = new DecompressionStream("gzip");
+  const w = ds.writable.getWriter();
+  w.write(bytes).catch(() => {});
+  w.close().catch(() => {});
+  return streamBytes(ds.readable);
+}
+
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -701,15 +713,25 @@ function slug(s) {
 async function lerPack(buf, nomeArquivo) {
   const zip = readZip(buf);
   const nomes = zip.nomes;
-  const estr = nomes.filter((n) => n.toLowerCase().endsWith(".mcstructure"));
-  if (!estr.length) throw new Error("Não achei a estrutura (.mcstructure) dentro do pack. Esse arquivo foi gerado pelo HoloPrint?");
+  // Aceita tanto estruturas NBT sem compressão quanto as estruturas GZIP do HoloPrint.
+  const estr = nomes.filter((n) => {
+    const low = n.toLowerCase();
+    return low.endsWith(".mcstructure") || low.endsWith(".mcstructure.gzip");
+  });
+  if (!estr.length) throw new Error("Não achei a estrutura (.mcstructure ou .mcstructure.gzip) dentro do pack. Esse arquivo foi gerado pelo HoloPrint?");
   const geoNome = nomes.find((n) => /models\/entity\/[^/]*hologram[^/]*\.geo\.json$/i.test(n)) || nomes.find((n) => /models\/entity\/.*\.geo\.json$/i.test(n));
   if (!geoNome) throw new Error("Não achei o modelo do holograma (.geo.json) dentro do pack.");
   const texes = nomes.map((n) => { const m = n.match(/hologram_opacity_([0-9.]+)\.png$/i); return m ? { n, o: parseFloat(m[1]) } : null; }).filter(Boolean).sort((a, b) => a.o - b.o);
   if (texes.length < 7) throw new Error(`Esperava 7 texturas de opacidade no pack e achei ${texes.length}.`);
   let nomePack = "";
   try { const m = JSON.parse(dec.decode(await zip.ler("manifest.json"))); nomePack = (m.header && m.header.name) || ""; } catch {}
-  const root = estruturaRaiz(await zip.ler(estr[0]));
+  let estruturaBytes = await zip.ler(estr[0]);
+  // Alguns packs guardam a estrutura em GZIP, inclusive quando o nome não deixa isso claro.
+  if (estr[0].toLowerCase().endsWith(".mcstructure.gzip") ||
+      (estruturaBytes.length >= 2 && estruturaBytes[0] === 0x1f && estruturaBytes[1] === 0x8b)) {
+    estruturaBytes = await gunzip(estruturaBytes);
+  }
+  const root = estruturaRaiz(estruturaBytes);
   const ajuste = ajustarEstrutura(root);
   const an = analisarEstrutura(root);
   return { zip, nomeArquivo, nomePack, geoNome, texes: texes.slice(0, 7).map((t) => t.n), root, ajuste, an, materiais: listarMateriais(an), avisoEstruturas: estr.length > 1 };
